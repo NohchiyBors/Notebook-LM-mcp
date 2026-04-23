@@ -11,6 +11,7 @@ venv/
 
 # Local tooling
 .claude/
+logs/
 
 # Codex / StatusProject working state
 TODO-*.md

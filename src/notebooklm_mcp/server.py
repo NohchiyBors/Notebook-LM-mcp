@@ -1,10 +1,13 @@
 from __future__ import annotations
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastmcp import FastMCP
 
 from .config import get_settings
 from .backends.base import NotebookLMBackend
+from .observability import LoggedBackend, configure_logging, get_logger
 from .models.common import (
     NotebookShareGrant, SourceBatchItem, StudioOptions,
     PodcastContextItem, StudioArtifactType,
@@ -18,11 +21,23 @@ from .tools import notebooks, sources, audio, studio, podcast, research, notes, 
 
 def _make_backend() -> NotebookLMBackend:
     cfg = get_settings()
+    configure_logging(cfg)
+    logger = get_logger("server")
     if cfg.mode == "enterprise":
         from .backends.enterprise import EnterpriseBackend
-        return EnterpriseBackend()
-    from .backends.web.backend import WebBackend
-    return WebBackend()
+        backend = EnterpriseBackend()
+    else:
+        from .backends.web.backend import WebBackend
+        backend = WebBackend()
+    logger.info(
+        "backend_created",
+        extra={
+            "event": "backend_created",
+            "mode": cfg.mode,
+            "backend": backend.__class__.__name__,
+        },
+    )
+    return LoggedBackend(backend, mode=cfg.mode)  # type: ignore[return-value]
 
 
 _backend: NotebookLMBackend | None = None
@@ -35,6 +50,49 @@ def get_backend() -> NotebookLMBackend:
     return _backend
 
 
+async def _server_startup() -> None:
+    """Warm auth state and start web-mode keepalive when the server starts."""
+    cfg = get_settings()
+    configure_logging(cfg)
+    logger = get_logger("server")
+    logger.info(
+        "server_startup",
+        extra={
+            "event": "server_startup",
+            "mode": cfg.mode,
+            "profile": cfg.profile if cfg.mode == "web" else None,
+            "location": cfg.location if cfg.mode == "enterprise" else None,
+        },
+    )
+    if cfg.mode == "web":
+        from .auth import cookies as cookie_store
+        try:
+            await cookie_store.ensure_fresh()
+            cookie_store.start_keepalive()
+        except FileNotFoundError:
+            logger.warning(
+                "web_auth_missing",
+                extra={"event": "web_auth_missing", "mode": cfg.mode, "profile": cfg.profile},
+            )
+
+
+async def _server_shutdown() -> None:
+    logger = get_logger("server")
+    logger.info("server_shutdown", extra={"event": "server_shutdown", "mode": get_settings().mode})
+    if get_settings().mode == "web":
+        from .auth import cookies as cookie_store
+        cookie_store.stop_keepalive()
+
+
+@asynccontextmanager
+async def _server_lifespan(_server: FastMCP) -> AsyncIterator[dict]:
+    await _server_startup()
+    try:
+        yield {}
+    finally:
+        await _server_shutdown()
+
+
 mcp = FastMCP(
     name="notebooklm-mcp",
     instructions=(
@@ -44,6 +102,7 @@ mcp = FastMCP(
         "enterprise — официальный REST API, требует подписку и Google Cloud проект "
         "(auth: gcloud auth application-default login или Service Account)."
     ),
+    lifespan=_server_lifespan,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -543,14 +602,22 @@ async def save_auth_tokens(
 async def refresh_auth() -> dict:
     """Обновить CSRF и session токены (web режим) или проверить Google Cloud auth."""
     cfg = get_settings()
+    logger = get_logger("auth")
+    logger.info("auth_refresh_start", extra={"event": "auth_refresh_start", "mode": cfg.mode})
     if cfg.mode == "web":
         from .auth import cookies as cookie_store
         tokens = cookie_store.get_tokens()
         tokens = await cookie_store.refresh_page_tokens(tokens)
         cookie_store.set_tokens(tokens)
-        return {"status": "ok", "csrf_refreshed": bool(tokens.csrf_token)}
+        result = {"status": "ok", "csrf_refreshed": bool(tokens.csrf_token)}
+        logger.info(
+            "auth_refresh_success",
+            extra={"event": "auth_refresh_success", "mode": cfg.mode, "csrf_refreshed": result["csrf_refreshed"]},
+        )
+        return result
     from .auth.gcloud import get_access_token
     token = get_access_token()
+    logger.info("auth_refresh_success", extra={"event": "auth_refresh_success", "mode": cfg.mode})
     return {"status": "ok", "token_prefix": token[:10] + "..."}
 
 
@@ -566,27 +633,8 @@ async def server_info() -> dict:
     }
 
 
-@mcp.on_startup()
-async def _on_startup() -> None:
-    """При старте сервера: прогреваем токены и запускаем keepalive."""
-    cfg = get_settings()
-    if cfg.mode == "web":
-        from .auth import cookies as cookie_store
-        try:
-            await cookie_store.ensure_fresh()
-            cookie_store.start_keepalive()
-        except FileNotFoundError:
-            pass  # Токены ещё не настроены — пользователь сделает это через save_auth_tokens
-
-
-@mcp.on_shutdown()
-async def _on_shutdown() -> None:
-    if get_settings().mode == "web":
-        from .auth import cookies as cookie_store
-        cookie_store.stop_keepalive()
-
-
 def main() -> None:
+    configure_logging()
     mcp.run()
 
 

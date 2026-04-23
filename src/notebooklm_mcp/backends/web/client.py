@@ -2,13 +2,13 @@
 from __future__ import annotations
 import asyncio
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
 from ...config import get_settings
 from ...auth import cookies as cookie_store
-from .parsers import parse_batchexecute, parse_streaming_query
+from .parsers import NotebookLMRpcError, parse_batchexecute, parse_streaming_query
 
 _BASE = "https://notebooklm.google.com"
 _BATCHEXECUTE = f"{_BASE}/_/LabsTailwindUi/data/batchexecute"
@@ -48,13 +48,16 @@ class WebClient:
             "Referer": _BASE + "/",
             "X-Same-Domain": "1",
             "X-Goog-Csrf-Token": tokens.csrf_token,
-            "Cookie": "; ".join(f"{k}={v}" for k, v in tokens.cookies.items()),
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
         }
+
+    def _apply_cookies(self, tokens: cookie_store.AuthTokens) -> None:
+        self._http.cookies.clear()
+        self._http.cookies.update(cookie_store.to_httpx_cookies(tokens))
 
     def _build_body(self, rpc_id: str, params: list, csrf_token: str) -> bytes:
         params_json = json.dumps(params, separators=(",", ":"), ensure_ascii=False)
@@ -72,16 +75,16 @@ class WebClient:
         tokens: cookie_store.AuthTokens,
         source_path: str = "/",
     ) -> str:
-        params = (
-            f"rpcids={rpc_id}"
-            f"&source-path={quote(source_path)}"
-            f"&bl={quote(tokens.build_label)}"
-            f"&hl={get_settings().language}"
-            f"&rt=c"
-        )
+        params = {
+            "rpcids": rpc_id,
+            "source-path": source_path,
+            "bl": tokens.build_label,
+            "hl": get_settings().language,
+            "rt": "c",
+        }
         if tokens.session_id:
-            params += f"&f.sid={quote(tokens.session_id)}"
-        return f"{_BATCHEXECUTE}?{params}"
+            params["f.sid"] = tokens.session_id
+        return f"{_BATCHEXECUTE}?{urlencode(params)}"
 
     # ── Основной вызов RPC ───────────────────────────────────────────────────
 
@@ -96,6 +99,7 @@ class WebClient:
 
         for attempt in range(self._max_retries + 1):
             try:
+                self._apply_cookies(tokens)
                 resp = await self._http.post(
                     self._batchexecute_url(rpc_id, tokens, source_path),
                     headers=self._base_headers(tokens),
@@ -115,7 +119,13 @@ class WebClient:
                 resp.raise_for_status()
 
             resp.raise_for_status()
-            return parse_batchexecute(resp.content, rpc_id)
+            try:
+                return parse_batchexecute(resp.content, rpc_id)
+            except NotebookLMRpcError as e:
+                if e.is_auth_error and attempt < self._max_retries:
+                    tokens = await self._refresh_auth(tokens)
+                    continue
+                raise
 
         raise RuntimeError(f"RPC {rpc_id} завершился ошибкой после {self._max_retries} попыток")
 
@@ -153,7 +163,12 @@ class WebClient:
             url += f"&f.sid={quote(tokens.session_id)}"
 
         body = self._build_body(rpc_id, params, tokens.csrf_token)
-        resp = await self._http.post(url, headers=self._base_headers(tokens), content=body)
+        self._apply_cookies(tokens)
+        resp = await self._http.post(
+            url,
+            headers=self._base_headers(tokens),
+            content=body,
+        )
         resp.raise_for_status()
         return parse_streaming_query(resp.content, rpc_id)
 
@@ -168,8 +183,8 @@ class WebClient:
         mime_type: str,
     ) -> None:
         tokens = cookie_store.get_tokens()
+        self._apply_cookies(tokens)
         headers_base = {
-            "Cookie": "; ".join(f"{k}={v}" for k, v in tokens.cookies.items()),
             "Origin": _BASE,
         }
 

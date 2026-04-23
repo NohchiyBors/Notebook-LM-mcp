@@ -4,6 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,7 @@ _KEEPALIVE_INTERVAL = 25 * 60
 @dataclass
 class AuthTokens:
     cookies: dict[str, str] = field(default_factory=dict)
+    raw_cookies: object | None = None
     csrf_token: str = ""
     session_id: str = ""
     build_label: str = _BUILD_FALLBACK
@@ -61,6 +63,54 @@ def _profile_dir() -> Path:
     return get_settings().profile_dir
 
 
+def _coerce_cookies_mapping(raw: object) -> dict[str, str]:
+    """
+    Приводит cookies.json к плоскому dict[str, str].
+
+    Поддерживается:
+    - объект имя → значение (как после nlm / save_auth_tokens);
+    - массив объектов с полями name/value (экспорт Chrome DevTools, Playwright и т.п.).
+    """
+    if isinstance(raw, dict):
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, str):
+                out[k] = v
+            elif v is not None:
+                out[k] = str(v)
+        return out
+
+    if isinstance(raw, list):
+        out = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            val = item.get("value")
+            if isinstance(name, str) and isinstance(val, str):
+                out[name] = val
+        return out
+
+    raise ValueError(
+        f"Неподдерживаемый формат cookies.json: ожидали dict или list, "
+        f"получили {type(raw).__name__}"
+    )
+
+
+def _metadata_timestamp(meta: dict) -> float:
+    if isinstance(meta.get("extracted_at"), (int, float)):
+        return float(meta["extracted_at"])
+    last_validated = meta.get("last_validated")
+    if isinstance(last_validated, str):
+        try:
+            return datetime.fromisoformat(last_validated).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def load_from_disk() -> AuthTokens:
     cookies_path = _profile_dir() / "cookies.json"
     meta_path    = _profile_dir() / "metadata.json"
@@ -71,7 +121,8 @@ def load_from_disk() -> AuthTokens:
             "Выполните аутентификацию: nlm login  (или save_auth_tokens)"
         )
 
-    cookies = json.loads(cookies_path.read_text(encoding="utf-8"))
+    parsed = json.loads(cookies_path.read_text(encoding="utf-8"))
+    cookies = _coerce_cookies_mapping(parsed)
     missing = _REQUIRED_COOKIES - set(cookies)
     if missing:
         raise ValueError(f"Отсутствуют обязательные cookies: {missing}")
@@ -82,34 +133,68 @@ def load_from_disk() -> AuthTokens:
 
     return AuthTokens(
         cookies=cookies,
+        raw_cookies=parsed,
         csrf_token=meta.get("csrf_token", ""),
         session_id=meta.get("session_id", ""),
         build_label=meta.get("build_label", _BUILD_FALLBACK),
-        extracted_at=meta.get("extracted_at", 0.0),
+        extracted_at=_metadata_timestamp(meta),
     )
 
 
-def save_to_disk(tokens: AuthTokens) -> None:
+def save_to_disk(tokens: AuthTokens, *, preserve_cookies: bool = True) -> None:
     profile = _profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
-    (profile / "cookies.json").write_text(
-        json.dumps(tokens.cookies, indent=2), encoding="utf-8"
-    )
-    (profile / "metadata.json").write_text(
-        json.dumps({
-            "csrf_token":   tokens.csrf_token,
-            "session_id":   tokens.session_id,
-            "build_label":  tokens.build_label,
-            "extracted_at": tokens.extracted_at,
-        }, indent=2),
-        encoding="utf-8",
-    )
+    cookies_path = profile / "cookies.json"
+    meta_path = profile / "metadata.json"
+
+    if not preserve_cookies or not cookies_path.exists():
+        raw = tokens.raw_cookies if tokens.raw_cookies is not None else tokens.cookies
+        cookies_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    metadata: dict = {}
+    if meta_path.exists():
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            metadata = {}
+    metadata.update({
+        "csrf_token": tokens.csrf_token,
+        "session_id": tokens.session_id,
+        "build_label": tokens.build_label,
+        "extracted_at": tokens.extracted_at,
+    })
+    meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
 # ── Token extraction ──────────────────────────────────────────────────────────
 
 def _cookie_header(cookies: dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+
+def to_httpx_cookies(tokens: AuthTokens) -> httpx.Cookies:
+    """Build domain-aware cookies for httpx requests without rewriting cookies.json."""
+    cookies = httpx.Cookies()
+    raw = tokens.raw_cookies
+
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            value = item.get("value")
+            domain = item.get("domain")
+            path = item.get("path", "/")
+            if isinstance(name, str) and isinstance(value, str):
+                cookies.set(name, value, domain=domain, path=path)
+                if domain == ".google.com":
+                    cookies.set(name, value, domain=".googleusercontent.com", path=path)
+        return cookies
+
+    for name, value in tokens.cookies.items():
+        cookies.set(name, value, domain=".google.com")
+        cookies.set(name, value, domain=".googleusercontent.com")
+    return cookies
 
 
 def _extract_page_tokens(html: str) -> tuple[str, str, str]:
@@ -125,14 +210,32 @@ def _extract_page_tokens(html: str) -> tuple[str, str, str]:
 
 async def refresh_page_tokens(tokens: AuthTokens) -> AuthTokens:
     """Перезагружает CSRF/session/build токены с homepage NotebookLM."""
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    }
+    async with httpx.AsyncClient(
+        cookies=to_httpx_cookies(tokens),
+        headers=headers,
+        timeout=30,
+        follow_redirects=True,
+    ) as client:
         resp = await client.get(
-            _NOTEBOOKLM_URL,
-            headers={"Cookie": _cookie_header(tokens.cookies)},
+            f"{_NOTEBOOKLM_URL}/",
         )
 
-    location = resp.headers.get("location", "")
-    if resp.status_code in (301, 302, 303) and "accounts.google.com" in location:
+    if "accounts.google.com" in str(resp.url):
         raise PermissionError(
             "Cookies просрочены — перенаправление на accounts.google.com. "
             "Выполните повторную аутентификацию: nlm login"

@@ -123,8 +123,29 @@ Supported environment variables:
 - `NOTEBOOKLM_LANGUAGE` for the web UI locale parameter
 - `NOTEBOOKLM_TIMEOUT`
 - `NOTEBOOKLM_MAX_RETRIES`
+- `NOTEBOOKLM_LOG_LEVEL` = `DEBUG`, `INFO`, `WARNING`, or `ERROR`
+- `NOTEBOOKLM_LOG_FILE` path for persistent logs, default `logs/notebooklm-mcp.log`
+- `NOTEBOOKLM_LOG_TO_CONSOLE=true|false`
+- `NOTEBOOKLM_LOG_FORMAT=text|json`
+- `NOTEBOOKLM_LOG_ARGUMENTS=true|false`, disabled by default to avoid leaking source text
+- `NOTEBOOKLM_LOG_MAX_VALUE_LENGTH`
 
 See [.env.example](./.env.example).
+
+## Logging
+
+The server configures package logging at startup and records backend calls, auth refreshes, startup, and shutdown events. Logs go to stderr and `logs/notebooklm-mcp.log` by default.
+
+Examples:
+
+```env
+NOTEBOOKLM_LOG_LEVEL=INFO
+NOTEBOOKLM_LOG_FILE=logs/notebooklm-mcp.log
+NOTEBOOKLM_LOG_FORMAT=json
+NOTEBOOKLM_LOG_ARGUMENTS=false
+```
+
+By default, call arguments are not logged. If `NOTEBOOKLM_LOG_ARGUMENTS=true`, values are sanitized: cookie/token/session fields are redacted, large text fields are summarized by length, and byte payloads are logged only by size.
 
 ## Authentication
 

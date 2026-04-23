@@ -39,17 +39,25 @@ class WebBackend(NotebookLMBackend):
         return _parse_notebook(result, notebook_id)
 
     async def notebook_list(self, page_size: int = 100) -> dict:
-        result = await self._c().call(R.RPC_NOTEBOOK_LIST, [[2], page_size])
+        # Формат параметров как у актуального web-клиента NotebookLM: [null, 1, null, [2]]
+        result = await self._c().call(R.RPC_NOTEBOOK_LIST, [None, 1, None, [2]])
         notebooks = []
-        items = safe_get(result, 0) or []
-        for item in items:
-            if not isinstance(item, list):
+        rows = safe_get(result, 0) if isinstance(result, list) and result else result
+        if not isinstance(rows, list):
+            rows = []
+        for item in rows:
+            if not isinstance(item, list) or len(item) < 3:
                 continue
+            title = item[0] if isinstance(item[0], str) else "Untitled"
+            sources = item[1] if isinstance(item[1], list) else []
+            nid = item[2]
             notebooks.append({
-                "notebookId": safe_get(item, 0),
-                "title": safe_get(item, 1),
-                "sourceCount": safe_get(item, 3),
+                "notebookId": nid,
+                "title": title,
+                "sourceCount": len(sources),
             })
+        if page_size >= 0 and len(notebooks) > page_size:
+            notebooks = notebooks[:page_size]
         return {"notebooks": notebooks}
 
     async def notebook_delete(self, notebook_ids: list[str]) -> dict:

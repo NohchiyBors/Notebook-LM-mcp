@@ -57,10 +57,36 @@ class Settings(BaseSettings):
     timeout: int = Field(default=120, description="Таймаут запросов (сек)")
     max_retries: int = Field(default=3, description="Макс. повторы при ошибках")
 
+    # ── Logging / observability ──────────────────────────────────────────────
+    log_level: str = Field(default="INFO", description="DEBUG | INFO | WARNING | ERROR")
+    log_file: str | None = Field(
+        default="logs/notebooklm-mcp.log",
+        description="Path to a log file. Empty value disables file logging.",
+    )
+    log_to_console: bool = Field(default=True, description="Also write logs to stderr")
+    log_format: Literal["text", "json"] = Field(default="text", description="Log format")
+    log_arguments: bool = Field(
+        default=False,
+        description="Log sanitized call arguments. Disabled by default to avoid leaking source text.",
+    )
+    log_max_value_length: int = Field(default=160, description="Max length for logged values")
+
     @field_validator("project_number", mode="before")
     @classmethod
     def _require_project_number_for_enterprise(cls, v: str | None) -> str | None:
         return v
+
+    @field_validator("log_file", mode="before")
+    @classmethod
+    def _empty_log_file_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, v: str | None) -> str:
+        return (v or "INFO").upper()
 
     @property
     def auth_dir_path(self) -> Path:
@@ -69,6 +95,12 @@ class Settings(BaseSettings):
     @property
     def profile_dir(self) -> Path:
         return self.auth_dir_path / "profiles" / self.profile
+
+    @property
+    def log_file_path(self) -> Path | None:
+        if not self.log_file:
+            return None
+        return Path(self.log_file).expanduser()
 
     # ── Enterprise URL helpers ────────────────────────────────────────────────
     @property
