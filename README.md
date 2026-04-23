@@ -88,6 +88,33 @@ Web mode:
 }
 ```
 
+Windows / Codex (if `notebooklm-mcp` is not on `PATH`, set `command` to the full path of `notebooklm-mcp.exe`; forward slashes are fine in JSON):
+
+```json
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "C:/Users/<you>/AppData/Local/Programs/Python/Python314/Scripts/notebooklm-mcp.exe",
+      "env": {
+        "NOTEBOOKLM_MODE": "web",
+        "NOTEBOOKLM_PROFILE": "default",
+        "NOTEBOOKLM_AUTH_DIR": "C:/Users/<you>/.notebooklm-mcp-cli",
+        "NOTEBOOKLM_LANGUAGE": "ru",
+        "NOTEBOOKLM_TIMEOUT": "120",
+        "NOTEBOOKLM_MAX_RETRIES": "3",
+        "NOTEBOOKLM_LOG_LEVEL": "INFO",
+        "NOTEBOOKLM_LOG_FILE": "C:/path/to/this/repo/logs/notebooklm-mcp.log",
+        "NOTEBOOKLM_LOG_TO_CONSOLE": "false",
+        "NOTEBOOKLM_LOG_FORMAT": "text",
+        "NOTEBOOKLM_LOG_ARGUMENTS": "false"
+      }
+    }
+  }
+}
+```
+
+For troubleshooting, set `NOTEBOOKLM_LOG_LEVEL=DEBUG`. With MCP stdio transports, keep `NOTEBOOKLM_LOG_TO_CONSOLE=false` so logs go to the file instead of mixing with JSON-RPC on stdout.
+
 Enterprise mode:
 
 ```json
