@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local envs
+.env
+.venv/
+venv/
+
+# Local tooling
+.claude/
+
+# Codex / StatusProject working state
+TODO-*.md
+MEMORY-*.md
+PROJECT-RESUME-*.md
+STATUS-LOG-*.md
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
